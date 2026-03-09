@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Conveyor Vision</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <script>
+    let controlMode = "esp32";
+    const CONVEYOR_MIN_PWM = -50;
+    const CONVEYOR_MAX_PWM = 50;
+    const CONVEYOR_DEADZONE = 10;
+
+    function setLight(state) {
+      return fetch('/control/light', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state })
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.error) {
+          alert(data.error);
+        }
+      })
+      .catch(error => {
+        console.error('Error setting light state:', error);
+        alert('Failed to send light command.');
+      });
+    }
+
+    function updateSystemResources() {
+      fetch('/system_resources')
+        .then(response => response.json())
+        .then(data => {
+          const cpuTempEl = document.getElementById('system-cpu-temp');
+          const cpuPctEl = document.getElementById('system-cpu-percent');
+          const ramPctEl = document.getElementById('system-ram-percent');
+          const ramAvailEl = document.getElementById('system-ram-available');
+
+          if (cpuTempEl) {
+            cpuTempEl.textContent = data.cpu_temperature != null ? `${data.cpu_temperature.toFixed(2)} °C` : 'No Data';
+          }
+          if (cpuPctEl) {
+            cpuPctEl.textContent = data.cpu_percent != null ? `${data.cpu_percent.toFixed(1)} %` : 'No Data';
+          }
+          if (ramPctEl) {
+            ramPctEl.textContent = data.ram_percent != null ? `${data.ram_percent.toFixed(1)} %` : 'No Data';
+          }
+          if (ramAvailEl) {
+            ramAvailEl.textContent = data.ram_available_mb != null ? `${data.ram_available_mb.toFixed(0)} MB free` : '';
+          }
+        })
+        .catch(error => console.error('Error fetching system resources:', error));
+    }
+
+    function applyAiStatusStyles(enabled) {
+      const chip = document.getElementById('ai-status-chip');
+      const dot = document.getElementById('ai-status-dot');
+      const statusEl = document.getElementById('ai-status');
+      if (chip) {
+        chip.classList.toggle('enabled', enabled);
+        chip.classList.toggle('disabled', !enabled);
+      }
+      if (dot) {
+        dot.classList.toggle('enabled', enabled);
+        dot.classList.toggle('disabled', !enabled);
+      }
+      if (statusEl) {
+        statusEl.textContent = enabled ? 'Enabled' : 'Disabled';
+      }
+    }
+
+    function updateInferenceBadge(data) {
+      const chip = document.getElementById('inference-chip');
+      const dot = document.getElementById('inference-dot');
+      const label = document.getElementById('inference-label');
+      const mode = data && data.mode ? data.mode : 'unknown';
+      const detail = data && data.detail ? data.detail : 'Inference status unavailable';
+      const modeClass = `inference-badge ${mode}`;
+      if (chip) {
+        chip.className = modeClass;
+      }
+      if (dot) {
+        dot.className = `chip-dot ${mode}`;
+      }
+      if (label) {
+        let text = detail;
+        if (data && data.snapshot_active) {
+          const remaining = data.snapshot_seconds_remaining != null ? Number(data.snapshot_seconds_remaining) : 0;
+          text = `${detail} – ${Math.max(0, remaining).toFixed(0)}s left`;
+        }
+        if (data && data.error) {
+          text = `${text} (${data.error})`;
+        }
+        label.textContent = text;
+      }
+    }
+
+    async function refreshInferenceState() {
+      const buttonEl = document.getElementById('ai-toggle-btn');
+      try {
+        const response = await fetch('/inference_status');
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        const enabled = !!data.ai_enabled;
+        if (buttonEl) {
+          buttonEl.textContent = enabled ? 'Disable AI Recognition' : 'Enable AI Recognition';
+          buttonEl.dataset.enabled = enabled ? '1' : '0';
+        }
+        applyAiStatusStyles(enabled);
+        updateInferenceBadge(data);
+      } catch (error) {
+        console.error('Error fetching inference status:', error);
+        applyAiStatusStyles(false);
+        updateInferenceBadge(null);
+        if (buttonEl) {
+          buttonEl.textContent = 'Retry AI Status';
+          buttonEl.dataset.enabled = '0';
+        }
+      }
+    }
+
+    async function toggleAiRecognition() {
+      const buttonEl = document.getElementById('ai-toggle-btn');
+      if (!buttonEl) return;
+      const currentlyEnabled = buttonEl.dataset.enabled === '1';
+      const target = !currentlyEnabled;
+      buttonEl.disabled = true;
+      try {
+        const response = await fetch('/ai_recognition', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: target })
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        await refreshInferenceState();
+      } catch (error) {
+        console.error('Error toggling AI recognition:', error);
+        alert('Failed to update AI recognition state. Check logs for details.');
+      } finally {
+        buttonEl.disabled = false;
+      }
+    }
+
+    function updateControlModeLabel() {
+      const label = document.getElementById('control-mode-label');
+      if (label) {
+        label.textContent = controlMode === 'manual' ? 'Manual' : 'ESP32';
+      }
+    }
+
+    function describeMotion(value, labels) {
+      const numericValue = Number(value) || 0;
+      if (numericValue === 0) {
+        return labels.zero;
+      }
+      return numericValue > 0 ? labels.positive : labels.negative;
+    }
+
+    function describeServoDirection(value) {
+      const numericValue = Number(value) || 0;
+      const center = 30;
+      const deadband = 2;
+      if (numericValue <= center - deadband) {
+        return 'Left';
+      }
+      if (numericValue >= center + deadband) {
+        return 'Right';
+      }
+      return 'Center';
+    }
+
+    function syncMotionControlsState() {
+      const isManual = controlMode === 'manual';
+      const sliderIds = ['conveyorSlider', 'servoSlider'];
+      sliderIds.forEach(id => {
+        const slider = document.getElementById(id);
+        if (slider) {
+          slider.disabled = !isManual;
+        }
+      });
+      const hint = document.getElementById('manual-mode-hint');
+      if (hint) {
+        const deadzoneMsg = `dead zone ±${CONVEYOR_DEADZONE}`;
+        hint.textContent = isManual
+          ? `Manual steering is active (${deadzoneMsg}).`
+          : `Switch to Manual control to enable steering sliders (${deadzoneMsg}).`;
+      }
+    }
+
+    function normalizeConveyorPwm(value) {
+      const numericValue = Number(value) || 0;
+      const clamped = Math.max(CONVEYOR_MIN_PWM, Math.min(CONVEYOR_MAX_PWM, numericValue));
+      return Math.abs(clamped) < CONVEYOR_DEADZONE ? 0 : clamped;
+    }
+
+    function updateConveyorSpeed(value) {
+      const numericValue = Number(value) || 0;
+      const normalized = normalizeConveyorPwm(numericValue);
+      const readout = document.getElementById('conveyorValue');
+      const direction = document.getElementById('conveyorDirection');
+      const slider = document.getElementById('conveyorSlider');
+      if (slider && normalized !== numericValue) {
+        slider.value = normalized;
+      }
+      if (readout) {
+        readout.textContent = normalized;
+      }
+      if (direction) {
+        direction.textContent = describeMotion(normalized, {
+          positive: 'Forward',
+          negative: 'Reverse',
+          zero: 'Stopped'
+        });
+      }
+      if (controlMode === "manual") {
+        fetch(`/set_conveyor_speed/${normalized}`, { method: 'POST' })
+          .then(response => response.json())
+          .catch(error => console.error('Error setting conveyor speed:', error));
+      }
+    }
+
+    function updateServoSteering(value) {
+      const numericValue = Math.min(Math.max(Number(value) || 0, 0), 60);
+      const readout = document.getElementById('servoValue');
+      const direction = document.getElementById('servoDirection');
+      if (readout) {
+        readout.textContent = numericValue;
+      }
+      if (direction) {
+        direction.textContent = describeServoDirection(numericValue);
+      }
+      if (controlMode === "manual") {
+        fetch(`/set_servo_angle/${numericValue}`, { method: 'POST' })
+          .then(response => response.json())
+          .catch(error => console.error('Error setting servo steering:', error));
+      }
+    }
+
+    function setControlMode(mode) {
+      controlMode = mode;
+      updateControlModeLabel();
+      syncMotionControlsState();
+      fetch('/set_control_mode/' + mode, { method: 'POST' })
+        .then(response => response.json())
+        .catch(error => console.error('Error updating control mode:', error));
+    }
+
+    async function loadModelOptions(selectEl, statusEl) {
+      if (!selectEl) return;
+      try {
+        const resp = await fetch('/models');
+        if (!resp.ok) throw new Error('models');
+        const data = await resp.json();
+        const models = Array.isArray(data.models) ? data.models : [];
+        const active = data.active;
+        selectEl.innerHTML = '';
+        if (!models.length) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'No models found';
+          selectEl.appendChild(opt);
+          selectEl.disabled = true;
+        } else {
+          selectEl.disabled = false;
+          models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.path;
+            opt.textContent = m.size_mb ? `${m.name} (${m.size_mb} MB)` : m.name;
+            if (active && m.path === active) {
+              opt.selected = true;
+            }
+            selectEl.appendChild(opt);
+          });
+        }
+      } catch (err) {
+        console.error('Model list error', err);
+        if (statusEl) {
+          statusEl.textContent = 'Cannot load model list';
+          setTimeout(() => statusEl.textContent = '', 3000);
+        }
+      }
+    }
+
+    async function applySelectedModel(selectEl, statusEl) {
+      if (!selectEl) return;
+      const path = selectEl.value;
+      if (!path) {
+        if (statusEl) {
+          statusEl.textContent = 'Pick a model first';
+          setTimeout(() => statusEl.textContent = '', 2500);
+        }
+        return;
+      }
+      if (statusEl) statusEl.textContent = 'Switching model…';
+      try {
+        const resp = await fetch('/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path })
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.status !== 'ok') {
+          throw new Error(data.message || 'model switch failed');
+        }
+        if (statusEl) statusEl.textContent = 'Model loaded';
+      } catch (err) {
+        console.error('Model switch error', err);
+        if (statusEl) statusEl.textContent = 'Model switch failed';
+      }
+      setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 3000);
+    }
+
+    let avgTestPollId = null;
+    let avgTestPollInFlight = false;
+
+    function startAverageTestPolling() {
+      if (avgTestPollId) return;
+      avgTestPollId = setInterval(refreshAverageTestStatus, 1000);
+    }
+
+    function stopAverageTestPolling() {
+      if (avgTestPollId) {
+        clearInterval(avgTestPollId);
+        avgTestPollId = null;
+      }
+    }
+
+    function updateAverageTestUi(data) {
+      const statusEl = document.getElementById('avg-test-status');
+      const btn = document.getElementById('avg-test-btn');
+      const avgEl = document.getElementById('avg-test-average');
+      const totalEl = document.getElementById('avg-test-total');
+      const samplesEl = document.getElementById('avg-test-samples');
+      const skippedEl = document.getElementById('avg-test-skipped');
+      const logEl = document.getElementById('avg-test-log');
+      const errorEl = document.getElementById('avg-test-error');
+      const running = !!data.running;
+      const startedAt = Number(data.started_at || 0);
+      const duration = Number(data.duration || 0);
+      const now = Date.now() / 1000;
+      const remaining = running && startedAt ? Math.max(0, duration - (now - startedAt)) : 0;
+
+      if (statusEl) {
+        statusEl.textContent = running ? `Running (${Math.ceil(remaining)}s left)` : (data.completed_at ? 'Completed' : 'Idle');
+      }
+      if (btn) {
+        btn.disabled = running;
+        btn.textContent = running ? 'Test Running...' : 'Run 30s Test';
+      }
+      if (avgEl) {
+        avgEl.textContent = data.average_detections != null ? Number(data.average_detections).toFixed(2) : '--';
+      }
+      if (totalEl) {
+        totalEl.textContent = data.total_detections != null ? data.total_detections : '--';
+      }
+      if (samplesEl) {
+        samplesEl.textContent = data.samples != null ? data.samples : '--';
+      }
+      if (skippedEl) {
+        skippedEl.textContent = data.skipped_samples != null ? data.skipped_samples : '--';
+      }
+      if (logEl) {
+        const lines = Array.isArray(data.log) ? data.log : [];
+        logEl.textContent = lines.length ? lines.join('\n') : 'No logs yet.';
+      }
+      if (errorEl) {
+        errorEl.textContent = data.error ? `Error: ${data.error}` : '';
+      }
+    }
+
+    async function refreshAverageTestStatus() {
+      if (avgTestPollInFlight) return;
+      avgTestPollInFlight = true;
+      try {
+        const resp = await fetch('/average_detections/status');
+        if (!resp.ok) {
+          throw new Error(`status ${resp.status}`);
+        }
+        const data = await resp.json();
+        updateAverageTestUi(data);
+        if (data.running) {
+          startAverageTestPolling();
+        } else {
+          stopAverageTestPolling();
+        }
+      } catch (err) {
+        console.error('Average test status error', err);
+      } finally {
+        avgTestPollInFlight = false;
+      }
+    }
+
+    async function startAverageTest() {
+      const btn = document.getElementById('avg-test-btn');
+      if (btn) btn.disabled = true;
+      try {
+        const resp = await fetch('/average_detections/start', { method: 'POST' });
+        const data = await resp.json();
+        updateAverageTestUi(data.state || data);
+        if (resp.ok || (data.state && data.state.running)) {
+          startAverageTestPolling();
+        } else if (btn) {
+          btn.disabled = false;
+        }
+      } catch (err) {
+        console.error('Average test start error', err);
+        alert('Failed to start 30s average test.');
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      updateSystemResources();
+      updateControlModeLabel();
+      syncMotionControlsState();
+      refreshInferenceState();
+      refreshAverageTestStatus();
+      setInterval(updateSystemResources, 3000);
+      setInterval(refreshInferenceState, 4000);
+      const sidebarModelSelect = document.getElementById('sidebar-model-select');
+      const sidebarModelStatus = document.getElementById('sidebar-model-status');
+      const sidebarModelApply = document.getElementById('sidebar-model-apply');
+      const sidebarModelRefresh = document.getElementById('sidebar-model-refresh');
+      if (sidebarModelApply) {
+        sidebarModelApply.addEventListener('click', () => applySelectedModel(sidebarModelSelect, sidebarModelStatus));
+      }
+      if (sidebarModelRefresh) {
+        sidebarModelRefresh.addEventListener('click', () => loadModelOptions(sidebarModelSelect, sidebarModelStatus));
+      }
+      loadModelOptions(sidebarModelSelect, sidebarModelStatus);
+    });
+  </script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="branding">
+      <h1>Conveyor Vision</h1>
+      <p>PCB inspection dashboard</p>
+    </div>
+    <div class="header-actions">
+      <div class="status-chip disabled" id="ai-status-chip">
+        <span class="chip-dot" id="ai-status-dot"></span>
+        <span id="ai-status">Loading...</span>
+      </div>
+      <button class="btn primary" id="ai-toggle-btn" type="button" onclick="toggleAiRecognition()">Enable AI Recognition</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="main-column">
+      <article class="card video-card">
+        <header class="card-header">
+          <div class="card-title-group">
+            <h2>Live Feed</h2>
+            <span class="card-meta" id="stream-status">Streaming</span>
+          </div>
+          <div class="inference-badge unknown" id="inference-chip">
+            <span class="chip-dot" id="inference-dot"></span>
+            <span id="inference-label">Determining inference source…</span>
+          </div>
+        </header>
+        <div class="video-wrapper">
+          <img src="{{ url_for('video_bp.measured_video') }}" alt="Live Stream not available" />
+        </div>
+        <div class="model-picker video-model-picker">
+          <label for="sidebar-model-select">YOLO / ONNX model</label>
+          <div class="model-toolbar">
+            <select id="sidebar-model-select"></select>
+            <div class="model-buttons">
+              <button class="btn secondary" type="button" id="sidebar-model-apply">Apply Model</button>
+              <button class="btn outline" type="button" id="sidebar-model-refresh">Refresh</button>
+            </div>
+          </div>
+          <div class="statusline" id="sidebar-model-status"></div>
+        </div>
+      </article>
+    </section>
+
+    <aside class="controls-column">
+      <article class="card motor-card">
+        <header class="card-header">
+          <h2>Conveyor Control</h2>
+          <span class="secondary-text">Mode: <span id="control-mode-label">ESP32</span></span>
+        </header>
+        <div class="slider-row">
+          <input type="range" min="-50" max="50" step="1" value="0" id="conveyorSlider" oninput="updateConveyorSpeed(this.value)" />
+          <span class="slider-value" id="conveyorValue">0</span>
+        </div>
+        <div class="motion-state">Direction: <strong id="conveyorDirection">Stopped</strong></div>
+        <p class="motion-note" id="manual-mode-hint">Manual steering status pending (dead zone ±10)...</p>
+        <p class="motion-note">Manual range ±10–50 PWM (values inside the dead zone send 0).</p>
+        <div class="button-row">
+          <button class="btn outline" type="button" onclick="setControlMode('esp32')">ESP32 Control</button>
+          <button class="btn outline" type="button" onclick="setControlMode('manual')">Manual Control</button>
+        </div>
+      </article>
+
+      <article class="card motor-card">
+        <header class="card-header">
+          <h2>Servo Steering</h2>
+          <span class="secondary-text">Range: 0 to 60 deg</span>
+        </header>
+        <div class="slider-row">
+          <input type="range" min="0" max="60" step="1" value="30" id="servoSlider" oninput="updateServoSteering(this.value)" />
+          <span class="slider-value" id="servoValue">30</span>
+        </div>
+        <div class="motion-state">Steering: <strong id="servoDirection">Center</strong></div>
+      </article>
+
+      <article class="card test-card">
+        <header class="card-header">
+          <h2>30s Average Test</h2>
+          <span class="secondary-text" id="avg-test-status">Idle</span>
+        </header>
+        <p class="secondary-text">Samples object detections every second and logs the results.</p>
+        <div class="button-row">
+          <button class="btn primary" id="avg-test-btn" type="button" onclick="startAverageTest()">Run 30s Test</button>
+        </div>
+        <div class="test-metrics">
+          <div class="test-metric">
+            <span>Average detections</span>
+            <strong id="avg-test-average">--</strong>
+          </div>
+          <div class="test-metric">
+            <span>Total detections</span>
+            <strong id="avg-test-total">--</strong>
+          </div>
+          <div class="test-metric">
+            <span>Samples</span>
+            <strong id="avg-test-samples">--</strong>
+          </div>
+          <div class="test-metric">
+            <span>Skipped</span>
+            <strong id="avg-test-skipped">--</strong>
+          </div>
+        </div>
+        <div class="statusline" id="avg-test-error"></div>
+        <pre class="log-box" id="avg-test-log">No logs yet.</pre>
+      </article>
+    </aside>
+
+    <aside class="sidebar">
+      <article class="card sensor-card">
+        <header class="card-header">
+          <h2>System Resources</h2>
+        </header>
+        <ul class="data-list">
+          <li>
+            <span>CPU Temperature</span>
+            <span id="system-cpu-temp">Loading...</span>
+          </li>
+          <li>
+            <span>CPU Usage</span>
+            <span id="system-cpu-percent">Loading...</span>
+          </li>
+          <li>
+            <span>RAM Usage</span>
+            <span>
+              <span id="system-ram-percent">Loading...</span>
+              <small id="system-ram-available" class="subtext"></small>
+            </span>
+          </li>
+          <li>
+            <span>Historical Charts</span>
+            <span><a href="/chart/system">Open system chart</a></span>
+          </li>
+        </ul>
+      </article>
+
+      <article class="card light-card">
+        <header class="card-header">
+          <h2>Lighting</h2>
+        </header>
+        <div class="button-column">
+          <button class="btn secondary" type="button" onclick="setLight('ON')">Light On</button>
+          <button class="btn secondary" type="button" onclick="setLight('OFF')">Light Off</button>
+        </div>
+      </article>
+    </aside>
+  </main>
+
+  <footer>
+    <p>SNS Automatyk - Krzaczek</p>
+  </footer>
+</body>
+</html>

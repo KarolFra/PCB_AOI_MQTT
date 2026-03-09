@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>System Resources</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      font-family: "Inter", "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      margin: 0;
+      padding: 32px;
+      overflow-y: auto; /* Zapobiega nieskończonemu scrollowi */
+    }
+    a {
+      color: #38bdf8;
+      text-decoration: none;
+    }
+    a:hover {
+      color: #0ea5e9;
+    }
+    .card {
+      max-width: 1100px;
+      margin: 0 auto;
+      background: rgba(15, 23, 42, 0.85);
+      padding: 24px;
+      border-radius: 18px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      box-shadow: 0 24px 48px rgba(8, 15, 31, 0.45);
+      height: auto;
+      max-height: 600px; /* Maksymalna wysokość karty, reszta scroll */
+      overflow: auto;
+    }
+    h1 {
+      margin-top: 0;
+      text-align: center;
+    }
+    #systemChart {
+      height: 400px !important; /* !important na wszelki wypadek */
+      width: 100%;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+    <a href="/">← Back to dashboard</a>
+    <button id="refreshBtn" style="padding:8px 14px; border:none; border-radius:10px; background:#38bdf8; color:#0f172a; font-weight:600; cursor:pointer;">Refresh</button>
+    <label style="color:#94a3b8; font-size:0.9rem;">
+      Auto-refresh
+      <input type="checkbox" id="autoRefreshToggle" checked>
+    </label>
+  </div>
+  <div class="card">
+    <h1>System Resource History</h1>
+    <p style="text-align:center; color:#94a3b8; margin-top:-12px;">
+      Showing {{ sample_count }} points. 
+      <!-- (limit {{ sample_limit }}). Sampler cadence follows <code>SYSTEM_DEBUG_INTERVAL</code>. -->
+    </p>
+    <canvas id="systemChart"></canvas>
+  </div>
+  <script>
+    let chartInstance = null;
+    const ctx = document.getElementById('systemChart').getContext('2d');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const autoToggle = document.getElementById('autoRefreshToggle');
+    let autoRefresh = autoToggle.checked;
+
+    function buildDatasets(chartData) {
+      const datasets = [];
+
+      const cpuPercent = chartData.cpu_percent.map(v => v == null ? null : Number(v));
+      const cpuTemp = chartData.cpu_temperature.map(v => v == null ? null : Number(v));
+      const ramPercent = chartData.ram_percent.map(v => v == null ? null : Number(v));
+      const ramAvail = chartData.ram_available_mb.map(v => v == null ? null : Number(v));
+
+      if (cpuPercent.some(v => v !== null)) {
+        datasets.push({
+          label: 'CPU Usage %',
+          data: cpuPercent,
+          borderColor: '#38bdf8',
+          backgroundColor: '#38bdf8',
+          yAxisID: 'cpu',
+          showLine: false,
+          borderWidth: 0,
+          pointRadius: 2, // Mniejszy, żeby nie wpływał na layout
+          pointHoverRadius: 5,
+          pointBackgroundColor: '#38bdf8'
+        });
+      }
+
+      if (cpuTemp.some(v => v !== null)) {
+        datasets.push({
+          label: 'CPU Temperature °C',
+          data: cpuTemp,
+          borderColor: '#f59e0b',
+          backgroundColor: '#f59e0b',
+          yAxisID: 'temp',
+          showLine: false,
+          borderWidth: 0,
+          pointRadius: 2,
+          pointHoverRadius: 5,
+          pointBackgroundColor: '#f59e0b'
+        });
+      }
+
+      if (ramPercent.some(v => v !== null)) {
+        datasets.push({
+          label: 'RAM Usage %',
+          data: ramPercent,
+          borderColor: '#22c55e',
+          backgroundColor: '#22c55e',
+          yAxisID: 'ram',
+          showLine: false,
+          borderWidth: 0,
+          pointRadius: 2,
+          pointHoverRadius: 5,
+          pointBackgroundColor: '#22c55e',
+          availableMb: ramAvail,
+        });
+      }
+
+      return datasets;
+    }
+
+    function applyAxisAnnotations(chart, datasets) {
+      const ramDataset = datasets.find(d => d.yAxisID === 'ram');
+      const ramAvail = ramDataset && ramDataset.availableMb ? ramDataset.availableMb.filter(v => v != null && !Number.isNaN(v)) : [];
+      const maxRamAvail = ramAvail.length ? Math.max(...ramAvail) : null;
+
+      const scales = chart.options.scales;
+      if (scales.ram) {
+        scales.ram.title.text = maxRamAvail != null ? `RAM Usage % (max ${maxRamAvail.toFixed(0)} MB free)` : 'RAM Usage %';
+      }
+    }
+
+    function renderChart(chartData) {
+      const datasets = buildDatasets(chartData);
+      const labels = chartData.timestamps;
+      if (chartInstance) {
+        chartInstance.data.labels = labels;
+        chartInstance.data.datasets = datasets;
+        applyAxisAnnotations(chartInstance, datasets);
+        chartInstance.options.animation = false; // Bez animacji przy update
+        chartInstance.update('none');
+        return;
+      }
+      chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets,
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          layout: {
+            padding: { bottom: 10 } // Mały padding, bez wpływu na wysokość
+          },
+          interaction: {
+            mode: 'index',
+            intersect: false,
+          },
+          scales: {
+            cpu: {
+              type: 'linear',
+              position: 'left',
+              min: 0,
+              max: 100,
+              title: {
+                display: true,
+                text: 'CPU Usage %',
+                color: '#38bdf8'
+              },
+              grid: {
+                color: 'rgba(148, 163, 184, 0.1)'
+              },
+              ticks: {
+                color: '#cbd5f5'
+              }
+            },
+            temp: {
+              type: 'linear',
+              position: 'right',
+              min: 25,
+              max: 90,
+              title: {
+                display: true,
+                text: 'CPU Temperature °C',
+                color: '#f59e0b'
+              },
+              grid: {
+                drawOnChartArea: false,
+              },
+              ticks: {
+                color: '#cbd5f5'
+              }
+            },
+            ram: {
+              type: 'linear',
+              position: 'right',
+              offset: true,
+              min: 0,
+              max: 100,
+              title: {
+                display: true,
+                text: 'RAM Usage %',
+                color: '#22c55e'
+              },
+              grid: {
+                drawOnChartArea: false,
+              },
+              ticks: {
+                color: '#cbd5f5'
+              }
+            },
+            x: {
+              ticks: {
+                maxRotation: 30,
+                minRotation: 30,
+                color: '#cbd5f5',
+                maxTicksLimit: 8, // Jeszcze mniej etykiet
+                callback: function(value, index, values) {
+                  // Skracaj długie labels, np. tylko czas
+                  const label = this.getLabelForValue(value);
+                  if (typeof label === 'string' && label.length > 10) {
+                    return label.split(' ')[1] || label; // Np. "12:34:56" zamiast pełnej daty
+                  }
+                  return label;
+                }
+              },
+              grid: {
+                color: 'rgba(148, 163, 184, 0.05)'
+              }
+            }
+          },
+          elements: {
+            point: {
+              radius: 2 // Globalnie mniejsze punkty
+            }
+          },
+          plugins: {
+            tooltip: {
+              callbacks: {
+                label(ctx) {
+                  const dataset = ctx.dataset;
+                  const value = ctx.parsed.y;
+                  if (value == null || Number.isNaN(value)) {
+                    return `${dataset.label}: no data`;
+                  }
+                  let suffix = '';
+                  if (dataset.yAxisID === 'temp') {
+                    suffix = ` ${value.toFixed(2)} °C`;
+                  } else if (dataset.yAxisID === 'cpu' || dataset.yAxisID === 'ram') {
+                    suffix = ` ${value.toFixed(1)} %`;
+                  }
+                  let label = `${dataset.label}:${suffix}`;
+                  if (dataset.yAxisID === 'ram' && dataset.availableMb) {
+                    const avail = dataset.availableMb[ctx.dataIndex];
+                    if (avail != null && !Number.isNaN(avail)) {
+                      label += ` (free ${avail.toFixed(0)} MB)`;
+                    }
+                  }
+                  return label;
+                }
+              }
+            },
+            legend: {
+              labels: {
+                color: '#e2e8f0'
+              }
+            }
+          },
+          animation: false // Bez animacji na starcie
+        }
+      });
+      applyAxisAnnotations(chartInstance, datasets);
+    }
+
+    function buildDataUrl() {
+      const url = new URL(window.location.href);
+      url.searchParams.set('format', 'json');
+      return url.toString();
+    }
+
+    async function fetchAndRender() {
+      try {
+        const response = await fetch(buildDataUrl());
+        if (!response.ok) {
+          throw new Error('Failed to fetch chart data');
+        }
+        const data = await response.json();
+        renderChart(data);
+      } catch (error) {
+        console.error('Chart refresh failed:', error);
+      }
+    }
+
+    refreshBtn.addEventListener('click', fetchAndRender);
+
+    autoToggle.addEventListener('change', () => {
+      autoRefresh = autoToggle.checked;
+    });
+
+    // Initial load
+    fetchAndRender();
+
+    setInterval(() => {
+      if (autoRefresh) {
+        fetchAndRender();
+      }
+    }, 1000);
+  </script>
+</body>
+</html>

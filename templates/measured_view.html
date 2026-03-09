@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Measured Stream</title>
+  <style>
+    :root{--bg:#0b1220;--card:#0f1a2b;--accent:#f6b000}
+    html,body{height:100%;margin:0;background:var(--bg);color:#fff;font-family:Inter,Segoe UI,Roboto,Arial,sans-serif}
+    .wrap{max-width:1600px;width:calc(100vw - 32px);margin:12px auto;padding:16px}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:12px;padding:12px}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+    .title{font-size:18px;font-weight:600}
+    .controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0;padding:10px;background:rgba(255,255,255,0.02);border-radius:8px}
+    .control label{display:flex;flex-direction:column;font-size:12px;color:#b6c2d9;gap:4px}
+    .control input,.control select{padding:6px;border-radius:4px;border:1px solid rgba(255,255,255,0.1);background:#070e1a;color:#fff}
+    .actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+    .actions button{background:var(--accent);color:#000;font-weight:600;border:none;border-radius:6px;padding:8px 16px;cursor:pointer}
+    .statusline{font-size:13px;color:#8ea2c9;min-height:18px}
+    .stream-container{position:relative;width:100%;background:#000;border-radius:8px;overflow:hidden}
+    /* Make the IMG responsive to container width */
+    .stream-container img{display:block;width:100%;height:auto;object-fit:contain}
+    /* Keep the container close to the native 720x640 aspect ratio */
+    .aspect{position:relative;padding-top:88.9%}
+    .aspect .stream-inner{position:absolute;top:0;left:0;right:0;bottom:0}
+    /* Overlay for labels/badges */
+    .badge{position:absolute;right:12px;top:12px;background:var(--card);color:var(--accent);padding:6px 10px;border-radius:999px;font-weight:600;font-size:13px}
+    /* Small screens adjustments */
+    @media (max-width:600px){.wrap{margin:8px;padding:8px}.title{font-size:16px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="header">
+        <div class="title">Live Feed</div>
+        <div class="subtitle">Streaming</div>
+      </div>
+      <div class="controls" style="margin-top:0">
+        <div class="control" style="grid-column: span 2;">
+          <label>Model
+            <select id="modelSelect"></select>
+          </label>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="applyModel" type="button">Załaduj model</button>
+        <button id="refreshModels" type="button">Odśwież listę</button>
+      </div>
+      <div class="statusline" id="modelStatus"></div>
+      <div class="controls">
+        <div class="control"><label>Crop left<input type="number" id="crop_left" min="0" step="10"></label></div>
+        <div class="control"><label>Crop right<input type="number" id="crop_right" min="0" step="10"></label></div>
+        <div class="control"><label>Crop top<input type="number" id="crop_top" min="0" step="10"></label></div>
+        <div class="control"><label>Crop bottom<input type="number" id="crop_bottom" min="0" step="10"></label></div>
+        <div class="control"><label>Pan right (+ moves right)<input type="number" id="pan_right" step="10"></label></div>
+        <div class="control"><label>Pan up (+ moves up)<input type="number" id="pan_up" step="10"></label></div>
+      </div>
+      <div class="actions">
+        <button id="applyViewport">Zapisz widok</button>
+        <button id="resetViewport" type="button">Reset</button>
+      </div>
+      <div class="statusline" id="viewportStatus"></div>
+      <div class="stream-container">
+        <div class="aspect">
+          <div class="stream-inner">
+            <!-- The <img> will automatically scale to container width. -->
+            <img id="liveImg" src="/measured_video" alt="Live Detection Stream">
+            <div class="badge" id="statusBadge">Preparing inference pipeline…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // The MJPEG endpoint sends multipart responses; to keep a responsive display
+    // we simply point the <img> `src` at the MJPEG route. The browser will keep
+    // updating the image while the <img> element sizes responsively.
+    // We'll poll inference status to update the badge text.
+    async function updateStatus(){
+      try{
+        const resp = await fetch('/inference_status');
+        if(!resp.ok) throw new Error('status');
+        const js = await resp.json();
+        const badge = document.getElementById('statusBadge');
+        if(js && js.inference_state && js.inference_state.mode){
+          let mode = js.inference_state.mode;
+          if(mode === 'snapshot') mode = 'Snapshot active';
+          if(mode === 'local') mode = js.inference_state.detail || 'Local model';
+          badge.textContent = mode;
+        }
+      }catch(e){
+        // ignore transient errors
+      }
+    }
+    // Poll every 2s
+    setInterval(updateStatus, 2000);
+    updateStatus();
+
+    // Ensure the image element keeps aspect and doesn't stretch when container changes.
+    const img = document.getElementById('liveImg');
+    img.addEventListener('error', ()=>{
+      // If browser cannot display MJPEG in IMG (some browsers), try using an <object>
+      // fallback: replace img with an object element that points to the MJPEG stream.
+      if(img.dataset.fallback) return;
+      const obj = document.createElement('object');
+      obj.data = '/measured_video';
+      obj.type = 'multipart/x-mixed-replace;boundary=frame';
+      obj.style.width = '100%';
+      obj.style.height = '100%';
+      obj.style.display = 'block';
+      obj.style.background = '#000';
+      img.parentNode.replaceChild(obj, img);
+      obj.onload = ()=> console.log('MJPEG fallback loaded');
+      img.dataset.fallback = '1';
+    });
+    const viewportFields = ['crop_left','crop_right','crop_top','crop_bottom','pan_right','pan_up'];
+    async function loadViewport(){
+      try{
+        const resp = await fetch('/stream_viewport');
+        if(!resp.ok) return;
+        const js = await resp.json();
+        const vp = js && js.viewport ? js.viewport : null;
+        if(!vp) return;
+        viewportFields.forEach(f=>{
+          const el = document.getElementById(f);
+          if(el && typeof vp[f] !== 'undefined'){
+            el.value = vp[f];
+          }
+        });
+      }catch(e){
+        console.warn('viewport fetch failed', e);
+      }
+    }
+    async function applyViewport(values){
+      const status = document.getElementById('viewportStatus');
+      status.textContent = 'Zapisywanie…';
+      try{
+        const resp = await fetch('/stream_viewport',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(values)
+        });
+        const js = await resp.json();
+        if(resp.ok){
+          status.textContent = 'Zmieniono widok';
+        }else{
+          status.textContent = 'Nie udało się zapisać: ' + (js.invalid ? JSON.stringify(js.invalid) : 'błąd');
+        }
+      }catch(e){
+        status.textContent = 'Błąd sieci';
+      }
+      setTimeout(()=>status.textContent='',2500);
+    }
+    document.getElementById('applyViewport').addEventListener('click',()=>{
+      const values = {};
+      viewportFields.forEach(f=>{
+        const el = document.getElementById(f);
+        if(!el) return;
+        const val = parseInt(el.value,10);
+        values[f] = isNaN(val)?0:val;
+      });
+      applyViewport(values);
+    });
+    document.getElementById('resetViewport').addEventListener('click',()=>{
+      viewportFields.forEach(f=>{
+        const el = document.getElementById(f);
+        if(el){
+          el.value = 0;
+        }
+      });
+      applyViewport({crop_left:0,crop_right:0,crop_top:0,crop_bottom:0,pan_right:0,pan_up:0});
+    });
+    loadViewport();
+
+    const modelSelect = document.getElementById('modelSelect');
+    const modelStatus = document.getElementById('modelStatus');
+    async function loadModels(){
+      try{
+        const resp = await fetch('/models');
+        if(!resp.ok) throw new Error('models');
+        const js = await resp.json();
+        const models = Array.isArray(js.models)?js.models:[];
+        const active = js.active;
+        modelSelect.innerHTML = '';
+        if(models.length === 0){
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'Brak modeli';
+          modelSelect.appendChild(opt);
+          modelSelect.disabled = true;
+          return;
+        }
+        modelSelect.disabled = false;
+        models.forEach(m=>{
+          const opt = document.createElement('option');
+          opt.value = m.path;
+          opt.textContent = m.name + (m.size_mb ? ` (${m.size_mb} MB)` : '');
+          if(active && m.path === active){
+            opt.selected = true;
+          }
+          modelSelect.appendChild(opt);
+        });
+      }catch(e){
+        modelStatus.textContent = 'Nie mogę pobrać listy modeli';
+        setTimeout(()=>modelStatus.textContent='',2500);
+      }
+    }
+    async function applyModel(){
+      const path = modelSelect.value;
+      if(!path){
+        modelStatus.textContent = 'Wybierz model';
+        setTimeout(()=>modelStatus.textContent='',2000);
+        return;
+      }
+      modelStatus.textContent = 'Przełączam model...';
+      try{
+        const resp = await fetch('/models',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({path})
+        });
+        const js = await resp.json();
+        if(resp.ok && js.status === 'ok'){
+          modelStatus.textContent = 'Załadowano model';
+          loadModels();
+        }else{
+          modelStatus.textContent = 'Błąd: ' + (js.message || 'nieznany');
+        }
+      }catch(e){
+        modelStatus.textContent = 'Błąd sieci';
+      }
+      setTimeout(()=>modelStatus.textContent='',3000);
+    }
+    document.getElementById('applyModel').addEventListener('click', applyModel);
+    document.getElementById('refreshModels').addEventListener('click', loadModels);
+    loadModels();
+  </script>
+</body>
+</html>

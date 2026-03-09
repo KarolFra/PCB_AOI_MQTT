@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Simple Controls</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; background: #f7f7f7; }
+    .card { background: #fff; padding: 16px; margin-bottom: 16px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    h2 { margin: 0 0 8px; font-size: 18px; }
+    .row { display: flex; align-items: center; gap: 10px; }
+    input[type=range] { flex: 1; }
+    .status { font-weight: 600; }
+    button { padding: 8px 12px; border: 1px solid #ccc; background: #eee; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #e0e0e0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Conveyor PWM (-50..50)</h2>
+    <div class="row">
+      <input type="range" min="-50" max="50" step="1" value="0" id="conv" oninput="setConveyor(this.value)">
+      <span class="status" id="convVal">0</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Servo Angle (0..60°)</h2>
+    <div class="row">
+      <input type="range" min="0" max="60" step="1" value="30" id="servo" oninput="setServo(this.value)">
+      <span class="status" id="servoVal">30</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Light</h2>
+    <div class="row">
+      <button onclick="setLight('ON')">ON</button>
+      <button onclick="setLight('OFF')">OFF</button>
+      <span class="status" id="lightStatus">?</span>
+    </div>
+  </div>
+
+<script>
+async function postJSON(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  return res.json();
+}
+
+async function setConveyor(val) {
+  const clamped = Math.max(-50, Math.min(50, Number(val) || 0));
+  document.getElementById('convVal').textContent = clamped;
+  try { await postJSON('/control/simple/conveyor', { pwm: clamped }); } catch (e) { console.error(e); }
+}
+
+async function setServo(val) {
+  const clamped = Math.max(0, Math.min(60, Number(val) || 0));
+  document.getElementById('servoVal').textContent = clamped;
+  try { await postJSON('/control/simple/servo', { angle: clamped }); } catch (e) { console.error(e); }
+}
+
+async function setLight(state) {
+  try {
+    const res = await postJSON('/control/simple/light', { state });
+    document.getElementById('lightStatus').textContent = res.light || state;
+  } catch (e) {
+    console.error(e);
+    document.getElementById('lightStatus').textContent = 'err';
+  }
+}
+</script>
+</body>
+</html>
