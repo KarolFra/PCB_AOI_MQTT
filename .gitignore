@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+venv_old/
+
+# Environment files
+.env
+.env.*
+
+# Logs
+*.log
+logs/
+logs_thesis/
+logger_auto.log
+logi_do_inzynierki.txt
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+instance/
+
+# Model weights / large artifacts
+models/
+weights*/
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Generated outputs
+results/
+results_detection/
+detections/
+reference_empty/
+tester_w_results/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Temporary / backup files
+*.bak
+*.orig
+*.rej
+*.rootbak
+*.swp
+*.swo
+*.tmp
